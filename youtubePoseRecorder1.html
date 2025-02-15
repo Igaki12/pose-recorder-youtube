@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>YouTube Canvas Recorder with Mediapipe Pose Detection</title>
+  <style>
+    /* コンテナ内にYouTubeプレイヤーとキャンバスオーバーレイを重ねる */
+    #video-container {
+      position: relative;
+      width: 640px;
+      height: 360px;
+      margin: 0 auto;
+    }
+    /* YouTubeプレイヤーのサイズ（iframe自体は自動生成されます） */
+    #player {
+      width: 640px;
+      height: 360px;
+    }
+    /* キャンバスをプレイヤー上にオーバーレイ（下層の操作を妨げない場合は pointer-events: none;） */
+    #video {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    /* ダウンロードリンクの簡易スタイル */
+    .download-link {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 6px 10px;
+      background: #007BFF;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <!-- コンテナ内に YouTube プレイヤーとオーバーレイ用の div を配置 -->
+  <div id="video-container">
+    <div id="player"></div>
+    <div id="video"></div>
+  </div>
+  <!-- 録画制御ボタン -->
+  <button id="startButton" disabled>録画開始</button>
+  <button id="stopButton" disabled>録画停止</button>
+  <br><br>
+  <!-- ダウンロードリンク -->
+  <a id="downloadLink" href="#" download="health-discovery.webm" style="display: none;">ダウンロード</a>
+  <br><br>
+
+  <!-- 1. YouTube IFrame API のスクリプトを非同期で読み込む -->
+  <script>
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+  </script>
+
+  <!-- 2. YouTube プレイヤーとキャンバス／MediaRecorder の処理 -->
+  <script>
+    var player;
+    // API 読み込み後に呼ばれる関数
+    function onYouTubeIframeAPIReady() {
+      player = new YT.Player('player', {
+        height: '360',
+        width: '640',
+        // サンプル動画ID（必要に応じて変更してください）
+        videoId: 'M7lc1UVf-VE',
+        events: {
+          'onReady': onPlayerReady,
+          'onStateChange': onPlayerStateChange
+        }
+      });
+    }
+
+    // 動画再生開始と同時にキャンバス作成／録画開始
+    function onPlayerReady(event) {
+      // 動画再生
+      event.target.playVideo();
+
+      /* --- キャンバスオーバーレイの作成 --- */
+      var videoDiv = document.getElementById('video');
+      videoDiv.innerHTML = "";  // 既存の内容をクリア
+
+      // キャンバス作成（#video 内に追加）
+      var canvas = document.createElement('canvas');
+      canvas.style.position = 'absolute';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.width = '100%';
+      canvas.style.height = '100%';
+      // キャンバス描画領域は親要素サイズに合わせる
+      canvas.width = videoDiv.clientWidth;
+      canvas.height = videoDiv.clientHeight;
+      videoDiv.appendChild(canvas);
+
+      var ctx = canvas.getContext('2d');
+      var startTime = Date.now();
+
+      // キャンバス描画ループ
+      function draw() {
+        var elapsed = Date.now() - startTime;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // 半透明の背景と録画中テキストの描画
+        ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "white";
+        ctx.font = "20px Arial";
+        ctx.fillText("Recording... " + Math.floor(elapsed / 1000) + "s", 10, 30);
+
+        /* ===== ここにMediapipeの姿勢推定結果を描画する処理を追加 ===== */
+        // ※注意: YouTube iframe 内の video 要素はクロスオリジンの場合があり、必ずしもピクセル取得できない場合があります。
+        // ここでは、プレイヤー内に存在する video 要素（自動生成される場合もある）を取得して処理しています。
+        var ytVideo = document.querySelector('#player video');
+        if (ytVideo && window.poseLandmarker) {
+          // 現在の動画再生時刻（ミリ秒）
+          let videoTime = ytVideo.currentTime * 1000;
+          // Mediapipe の detectForVideo() を呼び出す
+          window.poseLandmarker.detectForVideo(ytVideo, videoTime, (result) => {
+            if (window.DrawingUtils && result.landmarks) {
+              // DrawingUtils インスタンスを生成してランドマーク描画
+              const drawingUtils = new window.DrawingUtils(ctx);
+              for (const landmark of result.landmarks) {
+                drawingUtils.drawLandmarks(landmark, {
+                  radius: (data) =>
+                    data.from ? window.DrawingUtils.lerp(data.from.z, -0.15, 0.1, 5, 1) : 1
+                });
+                drawingUtils.drawConnectors(landmark, window.poseLandmarker.POSE_CONNECTIONS);
+              }
+            }
+          });
+        }
+        /* ===== Mediapipe 処理ここまで ===== */
+
+        requestAnimationFrame(draw);
+      }
+      draw();
+
+      /* --- MediaRecorder によるキャンバス録画 --- */
+      // canvas.captureStream() でキャンバスの描画内容を MediaStream として取得（fps=30）
+      var stream = canvas.captureStream(30);
+      var recordedChunks = [];
+      var options = { mimeType: 'video/webm; codecs=vp9' };
+      var mediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(stream, options);
+      } catch (e0) {
+        console.error('MediaRecorder 作成エラー (vp9):', e0);
+        try {
+          options = { mimeType: 'video/webm; codecs=vp8' };
+          mediaRecorder = new MediaRecorder(stream, options);
+        } catch (e1) {
+          console.error('MediaRecorder 作成エラー (vp8):', e1);
+          return;
+        }
+      }
+
+      // 録画データ受信イベント
+      mediaRecorder.ondataavailable = function (e) {
+        if (e.data && e.data.size > 0) {
+          recordedChunks.push(e.data);
+        }
+      };
+
+      // 録画停止時に Blob 化し、ダウンロードリンクを生成
+      mediaRecorder.onstop = function () {
+        var blob = new Blob(recordedChunks, { type: 'video/webm' });
+        var url = URL.createObjectURL(blob);
+        var downloadLink = document.getElementById('downloadLink');
+        downloadLink.style.display = '';
+        downloadLink.href = url;
+        downloadLink.download = 'canvas_recording.webm';
+        downloadLink.textContent = 'Download Recording';
+        downloadLink.className = 'download-link';
+        document.body.appendChild(downloadLink);
+      };
+
+      // 録画開始／停止ボタンの制御
+      var startButton = document.getElementById('startButton');
+      var stopButton = document.getElementById('stopButton');
+      startButton.disabled = false;
+      startButton.onclick = function () {
+        mediaRecorder.start();
+        console.log('Recording started');
+        startButton.disabled = true;
+        stopButton.disabled = false;
+      };
+      stopButton.onclick = function () {
+        mediaRecorder.stop();
+        console.log('Recording stopped');
+        startButton.disabled = false;
+        stopButton.disabled = true;
+      };
+    }
+
+    // プレイヤー状態変更時のイベント（サンプルでは再生開始後6秒で停止）
+    var done = false;
+    function onPlayerStateChange(event) {
+      if (event.data == YT.PlayerState.PLAYING && !done) {
+        setTimeout(stopVideo, 6000);
+        done = true;
+      }
+    }
+    function stopVideo() {
+      player.stopVideo();
+    }
+  </script>
+
+  <!-- 3. Mediapipe PoseLandmarker 等のモジュール読み込み（type="module"） -->
+  <script type="module">
+    import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.skypack.dev/@mediapipe/tasks-vision@0.10.0";
+
+    // Mediapipe モデル読み込み前に必要な WASM ファイル群を解決
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+    );
+    // 動画モードで PoseLandmarker を生成（numPoses:2 などのオプションは適宜調整）
+    window.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+        delegate: "GPU"
+      },
+      runningMode: "VIDEO",
+      numPoses: 2
+    });
+    // DrawingUtils もグローバル公開（drawLandmarks() 等で利用）
+    window.DrawingUtils = DrawingUtils;
+    console.log("Mediapipe PoseLandmarker loaded");
+  </script>
+</body>
+</html>

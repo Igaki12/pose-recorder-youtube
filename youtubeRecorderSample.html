@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <title>YouTubeオーバーレイ＋描画＆録画サンプル</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #222;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+
+        h2 {
+            margin-top: 20px;
+        }
+
+        /* コンテナ：YouTubeプレイヤーとキャンバスを重ねる */
+        #container {
+            position: relative;
+            width: 640px;
+            height: 360px;
+            margin: 20px auto;
+            border: 2px solid #fff;
+            background-color: #000;
+        }
+
+        /* YouTubeプレイヤー用のdiv（プレイヤーAPIが中身を生成） */
+        #player {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* オーバーレイキャンバス（描画用） */
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            /* 背景は透過 */
+            background-color: transparent;
+            cursor: crosshair;
+        }
+
+        /* コントロール領域 */
+        #controls {
+            margin: 10px auto;
+        }
+
+        button,
+        a {
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 16px;
+            text-decoration: none;
+            border: none;
+            border-radius: 4px;
+            background-color: #4CAF50;
+            color: #fff;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            background-color: #999;
+            cursor: not-allowed;
+        }
+
+        a {
+            background-color: #2196F3;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>YouTubeオーバーレイ＋描画＆録画サンプル</h2>
+    <!-- コンテナ内に YouTubeプレイヤー と 描画用キャンバス -->
+    <div id="container">
+        <div id="player"></div>
+        <canvas id="overlayCanvas"></canvas>
+    </div>
+
+    <!-- 操作用ボタン -->
+    <div id="controls">
+        <button id="startRecording" disabled>録画開始</button>
+        <button id="stopRecording" disabled>録画停止</button>
+        <button id="clearCanvas">描画クリア</button>
+        <br>
+        <a id="downloadLink" style="display:none;" href="#">動画ダウンロード</a>
+    </div>
+
+    <!-- YouTube IFrame Player API を非同期読み込み -->
+    <script>
+        var tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        var player;
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('player', {
+                height: '360',
+                width: '640',
+                videoId: 'M7lc1UVf-VE', // 適宜変更してください
+                events: {
+                    'onReady': onPlayerReady,
+                    'onStateChange': onPlayerStateChange
+                }
+            });
+        }
+
+        function onPlayerReady(event) {
+            event.target.playVideo();
+            //   オーバーレイキャンバスの描画処理を追加&サイズを調整
+            const canvas = document.getElementById('overlayCanvas');
+            const ctx = canvas.getContext('2d');
+            function resizeCanvas() {
+                canvas.width = document.getElementById('player').offsetWidth;
+                canvas.height = document.getElementById('player').offsetHeight;
+            }
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            const drawingUtis = new DrawingUtils(ctx, canvas.width, canvas.height); // 描画ユーティリティの初期化
+            document.getElementById('startRecording').disabled = false; //録画開始ボタンを有効化
+
+            let drawing = false;
+            let lastX = 0;
+            let lastY = 0;
+
+            canvas.addEventListener('mousedown', (e) => {
+                drawing = true;
+                const rect = canvas.getBoundingClientRect();
+                lastX = e.clientX - rect.left;
+                lastY = e.clientY - rect.top;
+            });
+            canvas.addEventListener('mousemove', (e) => {
+                if (!drawing) return;
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.beginPath();
+                ctx.moveTo(lastX, lastY);
+                ctx.lineTo(x, y);
+                ctx.stroke();
+                lastX = x;
+                lastY = y;
+            });
+            canvas.addEventListener('mouseup', () => drawing = false);
+            canvas.addEventListener('mouseout', () => drawing = false);
+
+            // クリアボタンでキャンバスをリセット
+            document.getElementById('clearCanvas').addEventListener('click', () => {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            });
+
+            let mediaRecorder;
+            let recordedChunks = [];
+
+            const startButton = document.getElementById('startRecording');
+            const stopButton = document.getElementById('stopRecording');
+            const downloadLink = document.getElementById('downloadLink');
+
+            startButton.addEventListener('click', async () => {
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                downloadLink.style.display = 'none';
+                recordedChunks = [];
+
+                // まず、録画対象のコンテナを取得
+                const container = document.getElementById('container');
+                let stream;
+
+                // HTML要素の captureStream() に対応していれば利用（※Chrome等では動作する場合あり）
+                if (typeof container.captureStream === 'function') {
+                    stream = container.captureStream(30); // 30fps を指定
+                } else {
+                    // 対応していない場合は getDisplayMedia() による画面キャプチャへフォールバック
+                    try {
+                        stream = await navigator.mediaDevices.getDisplayMedia({
+                            video: { frameRate: 30, width: 640, height: 360 }
+                        });
+                    } catch (err) {
+                        alert('画面キャプチャの取得に失敗しました: ' + err);
+                        startButton.disabled = false;
+                        stopButton.disabled = true;
+                        return;
+                    }
+                }
+
+                // MediaRecorder の初期化（mimeType はブラウザ依存なのでエラーが出たら他を試してください）
+                try {
+                    // Chromeではwebm形式が利用可能だが、iOSでは利用できないので、MP4形式を試みる
+                    if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) {
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+                    } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+                    } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+                        mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/mp4' });
+                    } else {
+                        throw new Error('適切なmimeTypeが利用できません');
+                    }
+                    // mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+                } catch (e) {
+                    console.error('MediaRecorder初期化エラー:', e);
+                    alert('MediaRecorderがサポートされていないか、適切なmimeTypeが利用できません。');
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                    return;
+                }
+
+                mediaRecorder.ondataavailable = function (event) {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = function () {
+                    // Chromeでは、webm方式が可能であるが、iOSでは利用できないので、MP4形式を試みる
+                    let extension = '.webm';
+                    if (MediaRecorder.isTypeSupported('video/webm')) {
+                        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                    } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+                        const blob = new Blob(recordedChunks, { type: 'video/mp4' });
+                        extension = '.mp4';
+                    } else {
+                        alert('録画データの保存に失敗しました : 適切なmimeTypeが利用できません');
+                        return;
+                    }
+                    // const blob = new Blob(recordedChunks, { type: 'video/webm' });
+                    const url = URL.createObjectURL(blob);
+                    downloadLink.href = url;
+                    downloadLink.download = 'recorded' + extension;
+                    downloadLink.style.display = 'inline-block';
+                    downloadLink.textContent = '動画をダウンロード';
+                };
+
+                mediaRecorder.start();
+            });
+
+            stopButton.addEventListener('click', () => {
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                    mediaRecorder.stop();
+                }
+            });
+
+        }
+
+        function onPlayerStateChange(event) {
+            // 状態変化時の処理（必要に応じて追記）
+        }
+    </script>
+
+    <script>
+        /*****************************
+         * オーバーレイキャンバスでの描画処理
+         *****************************/
+        const canvas = document.getElementById('overlayCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // キャンバスのサイズを正しく設定
+        // function resizeCanvas() {
+        //   // キャンバスの表示サイズ（CSS）と内部サイズを合わせる
+        //   canvas.width = canvas.offsetWidth;
+        //   canvas.height = canvas.offsetHeight;
+        // }
+        // resizeCanvas();
+        // window.addEventListener('resize', resizeCanvas);
+
+        // let drawing = false;
+        // let lastX = 0;
+        // let lastY = 0;
+
+        // canvas.addEventListener('mousedown', (e) => {
+        //   drawing = true;
+        //   const rect = canvas.getBoundingClientRect();
+        //   lastX = e.clientX - rect.left;
+        //   lastY = e.clientY - rect.top;
+        // });
+        // canvas.addEventListener('mousemove', (e) => {
+        //   if (!drawing) return;
+        //   const rect = canvas.getBoundingClientRect();
+        //   const x = e.clientX - rect.left;
+        //   const y = e.clientY - rect.top;
+        //   ctx.strokeStyle = 'red';
+        //   ctx.lineWidth = 3;
+        //   ctx.lineCap = 'round';
+        //   ctx.beginPath();
+        //   ctx.moveTo(lastX, lastY);
+        //   ctx.lineTo(x, y);
+        //   ctx.stroke();
+        //   lastX = x;
+        //   lastY = y;
+        // });
+        // canvas.addEventListener('mouseup', () => drawing = false);
+        // canvas.addEventListener('mouseout', () => drawing = false);
+
+        // // クリアボタンでキャンバスをリセット
+        // document.getElementById('clearCanvas').addEventListener('click', () => {
+        //   ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // });
+
+        /*****************************
+         * MediaRecorder による録画処理
+         *****************************/
+        // let mediaRecorder;
+        // let recordedChunks = [];
+
+        // const startButton = document.getElementById('startRecording');
+        // const stopButton = document.getElementById('stopRecording');
+        // const downloadLink = document.getElementById('downloadLink');
+
+        // startButton.addEventListener('click', async () => {
+        //     startButton.disabled = true;
+        //     stopButton.disabled = false;
+        //     downloadLink.style.display = 'none';
+        //     recordedChunks = [];
+
+        //     // まず、録画対象のコンテナを取得
+        //     const container = document.getElementById('container');
+        //     let stream;
+
+        //     // HTML要素の captureStream() に対応していれば利用（※Chrome等では動作する場合あり）
+        //     if (typeof container.captureStream === 'function') {
+        //         stream = container.captureStream(30); // 30fps を指定
+        //     } else {
+        //         // 対応していない場合は getDisplayMedia() による画面キャプチャへフォールバック
+        //         try {
+        //             stream = await navigator.mediaDevices.getDisplayMedia({
+        //                 video: { frameRate: 30, width: 640, height: 360 }
+        //             });
+        //         } catch (err) {
+        //             alert('画面キャプチャの取得に失敗しました: ' + err);
+        //             startButton.disabled = false;
+        //             stopButton.disabled = true;
+        //             return;
+        //         }
+        //     }
+
+        //     // MediaRecorder の初期化（mimeType はブラウザ依存なのでエラーが出たら他を試してください）
+        //     try {
+        //         // Chromeではwebm形式が利用可能だが、iOSでは利用できないので、MP4形式を試みる
+        //         if (MediaRecorder.isTypeSupported('video/webm; codecs=vp9')) {
+        //             mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+        //         } else if (MediaRecorder.isTypeSupported('video/webm')) {
+        //             mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+        //         } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+        //             mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/mp4' });
+        //         } else {
+        //             throw new Error('適切なmimeTypeが利用できません');
+        //         }
+        //         // mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+        //     } catch (e) {
+        //         console.error('MediaRecorder初期化エラー:', e);
+        //         alert('MediaRecorderがサポートされていないか、適切なmimeTypeが利用できません。');
+        //         startButton.disabled = false;
+        //         stopButton.disabled = true;
+        //         return;
+        //     }
+
+        //     mediaRecorder.ondataavailable = function (event) {
+        //         if (event.data && event.data.size > 0) {
+        //             recordedChunks.push(event.data);
+        //         }
+        //     };
+
+        //     mediaRecorder.onstop = function () {
+        //         // Chromeでは、webm方式が可能であるが、iOSでは利用できないので、MP4形式を試みる
+        //         let extension = '.webm';
+        //         if (MediaRecorder.isTypeSupported('video/webm')) {
+        //             const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        //         } else if (MediaRecorder.isTypeSupported('video/mp4')) {
+        //             const blob = new Blob(recordedChunks, { type: 'video/mp4' });
+        //             extension = '.mp4';
+        //         } else {
+        //             alert('録画データの保存に失敗しました : 適切なmimeTypeが利用できません');
+        //             return;
+        //         }
+        //         // const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        //         const url = URL.createObjectURL(blob);
+        //         downloadLink.href = url;
+        //         downloadLink.download = 'recorded' + extension;
+        //         downloadLink.style.display = 'inline-block';
+        //         downloadLink.textContent = '動画をダウンロード';
+        //     };
+
+        //     mediaRecorder.start();
+        // });
+
+        // stopButton.addEventListener('click', () => {
+        //     startButton.disabled = false;
+        //     stopButton.disabled = true;
+        //     if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        //         mediaRecorder.stop();
+        //     }
+        // });
+    </script>
+</body>
+
+</html>

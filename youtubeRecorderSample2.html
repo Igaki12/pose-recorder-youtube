@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <title>YouTube &amp; Canvas Recording Demo</title>
+  <style>
+    /* プレイヤーとcanvasを内包するコンテナ */
+    #player-container {
+      position: relative;
+      width: 640px;
+      height: 360px;
+      margin: 0 auto;
+    }
+
+    /* YouTubeプレイヤー（iframe）はコンテナサイズに合わせる */
+    #player {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* canvas はプレイヤーの上に重ねる */
+    #overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      /* 背景透過 */
+      pointer-events: none;
+      /* クリック等は下のプレイヤーへ */
+    }
+  </style>
+</head>
+
+<body>
+  <!-- コンテナ内にプレイヤーと canvas を配置 -->
+  <div id="player-container">
+    <!-- YouTube プレイヤーが生成される領域 -->
+    <div id="player"></div>
+    <!-- オーバーレイ用 canvas -->
+    <canvas id="overlay"></canvas>
+    <br><br>
+
+    <!-- 録画制御ボタン -->
+    <button id="startButton">録画開始</button>
+    <button id="stopButton">録画停止</button>
+    <br><br>
+    <!-- ダウンロードリンク -->
+    <a id="downloadLink" href="#" download="health-discovery.webm">ダウンロード</a>
+    <br><br>
+
+  </div>
+
+  <!-- YouTube IFrame Player API を非同期読み込み -->
+  <script>
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+    var player;
+    function onYouTubeIframeAPIReady() {
+      player = new YT.Player('player', {
+        height: '360',
+        width: '640',
+        videoId: 'M7lc1UVf-VE',  // お好みの動画IDに変更可能
+        events: {
+          'onReady': onPlayerReady,
+          'onStateChange': onPlayerStateChange
+        }
+      });
+    }
+
+    // プレイヤー準備完了時の処理
+    function onPlayerReady(event) {
+      // 動画再生開始
+      // event.target.playVideo();
+
+      // canvas 要素の取得とサイズ設定
+      const canvas = document.getElementById('overlay');
+      // ※ canvas の実際の描画サイズは属性で指定する
+      canvas.width = canvas.offsetWidth;
+      canvas.height = canvas.offsetHeight;
+      const ctx = canvas.getContext('2d');
+
+      // 毎フレーム、canvas をクリアして水平線を描画する
+      function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.beginPath();
+        // canvas の中央に水平線（線幅5px、赤色）を描画
+        ctx.moveTo(0, canvas.height / 2);
+        ctx.lineTo(canvas.width, canvas.height / 2);
+        ctx.lineWidth = 5;
+        ctx.strokeStyle = 'red';
+        ctx.stroke();
+        requestAnimationFrame(draw);
+      }
+      draw();
+
+      // canvas の映像をキャプチャして MediaRecorder で録画する
+      const stream = canvas.captureStream(30);  // 30fps でキャプチャ
+      let recordedChunks = [];
+      let options = { mimeType: 'video/webm; codecs=vp9' };
+      let mediaRecorder;
+      try {
+        mediaRecorder = new MediaRecorder(stream, options);
+      } catch (e) {
+        console.error('MediaRecorder 作成エラー:', e);
+        return;
+      }
+
+      // データが利用可能になったらチャンクを保存
+      mediaRecorder.ondataavailable = function (event) {
+        if (event.data && event.data.size > 0) {
+          recordedChunks.push(event.data);
+        }
+      };
+
+      // 録画停止時に Blob 化してダウンロードリンクと再生用 video 要素を追加
+      mediaRecorder.onstop = function () {
+        const blob = new Blob(recordedChunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+
+        // ダウンロードリンクの生成
+        const downloadLink = document.createElement('a');
+        downloadLink.href = url;
+        downloadLink.download = 'recorded_canvas.webm';
+        downloadLink.textContent = '録画動画をダウンロード';
+        downloadLink.style.display = 'block';
+        downloadLink.style.marginTop = '10px';
+        document.body.appendChild(downloadLink);
+
+        // 録画動画を再生する video 要素の生成
+        const recordedVideo = document.createElement('video');
+        recordedVideo.controls = true;
+        recordedVideo.src = url;
+        recordedVideo.style.display = 'block';
+        recordedVideo.style.marginTop = '10px';
+        document.body.appendChild(recordedVideo);
+      };
+
+      // 録画開始
+      mediaRecorder.start();
+
+      // 6秒後に録画停止（YouTube側の動画停止と同期）
+      setTimeout(() => {
+        mediaRecorder.stop();
+      }, 6000);
+    }
+
+    // プレイヤーの状態変化時の処理（例：再生開始後6秒で動画停止）
+    var done = false;
+    function onPlayerStateChange(event) {
+      if (event.data == YT.PlayerState.PLAYING && !done) {
+        setTimeout(stopVideo, 6000);
+        done = true;
+      }
+    }
+    function stopVideo() {
+      player.stopVideo();
+    }
+  </script>
+</body>
+
+</html>
